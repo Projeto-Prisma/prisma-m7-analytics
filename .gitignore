@@ -1,0 +1,20 @@
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Arquivos de ambiente (NUNCA subir)
+.env
+
+# Cache e artefatos Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+coverage.xml
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
