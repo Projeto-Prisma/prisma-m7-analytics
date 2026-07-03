@@ -1,9 +1,10 @@
 import threading
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from src.banco.conexao import conectar_banco, fechar_conexao
+from src.banco.conexao import conectar_banco, fechar_conexao, db
 from src.mensageria.consumidor import iniciar_consumidor
 
 @asynccontextmanager
@@ -20,7 +21,6 @@ async def lifespan(app: FastAPI):
 
     print("[M7] A subir o consumidor RabbitMQ em background...")
     try:
-        # Apanha o "motor" assíncrono principal para passar à Thread do Pika
         main_loop = asyncio.get_running_loop()
         thread_consumidor = threading.Thread(
             target=iniciar_consumidor, 
@@ -44,6 +44,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Essencial para permitir que a aplicação Web (React/Next.js) consuma a API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/health")
 def health_check():
     return {
@@ -51,6 +60,43 @@ def health_check():
         "modulo": "M7 - Analytics",
         "broker_conectado": app.state.broker_conectado,
         "banco_conectado": app.state.banco_conectado
+    }
+
+@app.get("/api/v1/analytics/mapa-calor")
+async def obter_mapa_calor():
+    """Retorna os clusters de recorrência para a renderização do mapa no Frontend."""
+    if not app.state.banco_conectado or db.db is None:
+        raise HTTPException(status_code=503, detail="Banco de dados indisponível")
+        
+    cursor = db.db["clusters_view"].find({}, {"_id": 0})
+    clusters = await cursor.to_list(length=1000)
+    return {"clusters": clusters}
+
+@app.get("/api/v1/analytics/kpis")
+async def obter_kpis():
+    """Retorna indicadores chave de desempenho para o dashboard de gestão."""
+    if not app.state.banco_conectado or db.db is None:
+        raise HTTPException(status_code=503, detail="Banco de dados indisponível")
+        
+    total_denuncias = await db.db["denuncias_view"].count_documents({})
+    total_clusters = await db.db["clusters_view"].count_documents({})
+    
+    # Aggregation Pipeline do MongoDB: agrupa as denúncias por categoria para o ranking
+    pipeline = [
+        {"$group": {"_id": "$categoria", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 5}
+    ]
+    top_categorias_cursor = db.db["denuncias_view"].aggregate(pipeline)
+    top_categorias = await top_categorias_cursor.to_list(length=5)
+    
+    return {
+        "total_denuncias": total_denuncias,
+        "total_clusters": total_clusters,
+        "top_categorias": [
+            {"categoria": c["_id"], "quantidade": c["count"]} 
+            for c in top_categorias if c["_id"] is not None
+        ]
     }
 
 if __name__ == "__main__":
