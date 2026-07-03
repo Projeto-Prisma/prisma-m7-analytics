@@ -1,45 +1,48 @@
 import os
 import json
 import pika
+import asyncio
+from src.banco.projecao import processar_evento_cqrs
 
 RABBITMQ_URL = os.getenv("M7_RABBITMQ_URL", "amqp://prisma:prisma_secret@localhost:5672/")
 EXCHANGE = os.getenv("M7_EXCHANGE", "denuncias")
 FILA = os.getenv("M7_FILA", "m7.analytics")
-ROUTING_KEY = "#"  # O coração do CQRS: escuta TODOS os eventos do sistema
+ROUTING_KEY = "#"  # Escuta tudo!
 
-def iniciar_consumidor():
+def iniciar_consumidor(main_loop):
     try:
         parameters = pika.URLParameters(RABBITMQ_URL)
         connection = pika.BlockingConnection(parameters)
         channel = connection.channel()
 
-        # Declara o exchange e a fila durável
         channel.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
         channel.queue_declare(queue=FILA, durable=True)
-        
-        # Faz o bind usando o curinga '#'
         channel.queue_bind(exchange=EXCHANGE, queue=FILA, routing_key=ROUTING_KEY)
 
         def callback(ch, method, properties, body):
             try:
                 evento = method.routing_key
                 dados = json.loads(body)
-                print(f"[M7-CQRS] Evento capturado: '{evento}' -> Dados: {dados.get('id', 'N/A')}")
+                print(f"[M7] Mensagem recebida: {evento}")
                 
-                # TODO: Passar o evento para o motor de projeção do MongoDB (Commit 5)
+                # Como a biblioteca Pika é síncrona e o MongoDB (motor) é assíncrono,
+                # usamos o loop do FastAPI para injetar a tarefa de gravação sem travar a fila.
+                if main_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        processar_evento_cqrs(evento, dados), 
+                        main_loop
+                    )
                 
                 ch.basic_ack(delivery_tag=method.delivery_tag)
             except Exception as e:
-                print(f"[M7-CQRS] Erro ao processar evento: {e}")
-                # Rejeita sem requeue para evitar loops infinitos de erro
+                print(f"[M7] Erro ao processar evento: {e}")
                 ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
-        # O M7 pode processar lotes maiores porque fará apenas inserções/atualizações no Mongo
         channel.basic_qos(prefetch_count=10)
         
-        print(f"[M7] Consumidor Universal Operacional. A escutar '{ROUTING_KEY}' em '{FILA}'...")
+        print(f"[M7] Consumidor Universal Operacional. À escuta de '{ROUTING_KEY}'...")
         channel.basic_consume(queue=FILA, on_message_callback=callback)
         channel.start_consuming()
         
     except Exception as e:
-        print(f"[M7] Erro crítico de mensageria (RabbitMQ desligado localmente?): {e}")
+        print(f"[M7] Erro crítico de mensageria: {e}")
